@@ -23,13 +23,26 @@ on:
         type: string
         required: true
         default: ""
-    secrets:
-      MACOS_CROSS_TOOLS_KEY:
-        description: macOS cross tools 7z password
-        required: true
 
 jobs:
-  win-build:
+  get-sdk:
+    runs-on: macos-latest
+    steps:
+      - name: Get macOS SDK path
+        id: sdk-path
+        run: |
+          SDK_PATH=$(xcrun --show-sdk-path)
+          echo "Found SDK at: $SDK_PATH"
+          tar -czf macos-sdk.tar.gz -C $(dirname "$SDK_PATH") $(basename "$SDK_PATH")
+
+      - name: Upload SDK
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-sdk
+          path: macos-sdk.tar.gz
+          compression-level: 9
+
+  mac-build:
     runs-on: ${{ matrix.runs-on }}
     strategy:
       matrix:
@@ -101,7 +114,6 @@ jobs:
         sudo rm -rf /usr/share/miniconda
         sudo rm -rf /usr/local/share/vcpkg
 
-
         echo
         echo
 
@@ -109,10 +121,15 @@ jobs:
         free -h
         df -h
 
-    - name: Download macOS Cross Tools
+    - name: Download macOS SDK
+      uses: actions/download-artifact@v4
+      with:
+        name: macos-sdk
+        path: ~/cross-tools/
+
+    - name: Extract macOS SDK
       run: |
-        get -P /home/runner/cross-tools/ https://repo.ablaze.one/data/floorp/macos-cross-tools/macOS-cross-tools.7z
-        7z x -y -p${{ secrets.MACOS_CROSS_TOOLS_KEY }} /home/runner/cross-tools/macOS-cross-tools.7z -o/home/runner/cross-tools/
+        tar -xzf ~/cross-tools/macos-sdk.tar.gz -C /home/runner/cross-tools/
 
     - name: Setup 🪛
       run: |
@@ -167,7 +184,6 @@ jobs:
         ./mach package
         rm -rf ~/.cargo
 
-    # Publish START
     - name: rsync binaries
       run: |
         rsync -aqhL --progress obj-${{ matrix.arch }}-apple-darwin/dist/bin/ ~/output
@@ -185,4 +201,66 @@ jobs:
       with:
         name: noraneko-mac-${{ matrix.arch }}-moz-artifact
         path: obj-${{ matrix.arch }}-apple-darwin/dist/noraneko-*.zip
+
+  mac-integration:
+    runs-on: macos-latest
+    steps:
+    - name: Clone 📥
+      uses: actions/checkout@v4
+      with:
+        submodules: 'recursive'
+        token: ${{ secrets.PAT }}
+
+    - name: download AArch64 build artifact 📥
+      uses: actions/download-artifact@v4
+      with:
+        name: noraneko-mac-aarch64-dev
+        path: ./
+
+    - name: download x86_64 build artifact 📥
+      uses: actions/download-artifact@v4
+      with:
+        name: noraneko-mac-x86_64-dev
+        path: ./
+
+    - name: Extract 📦
+      run: |
+        brew install gnu-tar
+        export PATH=/usr/local/opt/gnu-tar/libexec/gnubin:$PATH
+        tar -xf ./noraneko-mac-aarch64-dev
+        tar -xf ./noraneko-mac-x86_64-dev
+
+    - name: Setup Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - name: Create environment 🌲
+      shell: bash
+      run: |
+        ./mach --no-interactive bootstrap --application-choice browser
+        echo -e "ac_add_options --enable-bootstrap" >> mozconfig
+
+    - name: Integration 🗃
+      run: |
+        ./mach python "./toolkit/mozapps/installer/unify.py" "./obj-x86_64-apple-darwin/dist/noraneko/Noraneko.app" "./obj-aarch64-apple-darwin/dist/noraneko/Noraneko.app"
+
+    # Publish START
+    - name: rsync binaries
+      run: |
+        rsync -aqhL --progress obj-x86_64-apple-darwin/dist/noraneko/Noraneko.app ~/output
+
+    - name: Publish Package🎁
+      uses: actions/upload-artifact@v4
+      with:
+        name: noraneko-mac-universal-dev
+        compression-level: 9
+        path: ~/output
+
+    - name: Publish Package full🎁
+      if: inputs.package-full
+      uses: actions/upload-artifact@v4
+      with:
+        name: noraneko-mac-universal-moz-artifact
+        path: obj-x86_64-apple-darwin/dist/noraneko-*.dmg
     # Publish END
